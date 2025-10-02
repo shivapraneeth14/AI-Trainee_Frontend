@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <!--
+    If you are serving your web app in a path other than the root, change the
+    href value below to reflect the base path you are serving from.
+
+    The path provided below has to start and end with a slash "/" in order for
+    it to work correctly.
+
+    For more details:
+    * https://developer.mozilla.org/en-US/docs/Web/HTML/Element/base
+
+    This is a placeholder for base href that will be replaced by the value of
+    the `--base-href` argument provided to `flutter build`.
+  -->
+  <base href="$FLUTTER_BASE_HREF">
+
+  <meta charset="UTF-8">
+  <meta content="IE=Edge" http-equiv="X-UA-Compatible">
+  <meta name="description" content="A new Flutter project.">
+
+  <!-- iOS meta tags & icons -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <meta name="apple-mobile-web-app-title" content="project">
+  <link rel="apple-touch-icon" href="icons/Icon-192.png">
+
+  <!-- Favicon -->
+  <link rel="icon" type="image/png" href="favicon.png"/>
+
+  <title>project</title>
+  <link rel="manifest" href="manifest.json">
+</head>
+<body>
+  <!-- MediaPipe Pose and bridge -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5/pose.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3/camera_utils.js"></script>
+  <script>
+    window.PoseBridge = (function() {
+      console.log('[PoseBridge] init');
+      const pose = new Pose({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5/${file}`});
+      pose.setOptions({
+        modelComplexity: 1,
+        smoothLandmarks: true,
+        enableSegmentation: false,
+        smoothSegmentation: false,
+        minDetectionConfidence: 0.5,
+        minTrackingConfidence: 0.5,
+      });
+
+      async function detectFromDataUrl(dataUrl) {
+        return new Promise(async (resolve, reject) => {
+          try {
+            const img = new Image();
+            img.onload = async () => {
+              try {
+                const canvas = document.createElement('canvas');
+                canvas.width = img.naturalWidth || img.width;
+                canvas.height = img.naturalHeight || img.height;
+                const ctx = canvas.getContext('2d');
+                ctx.drawImage(img, 0, 0);
+                const result = await pose.send({image: canvas});
+                // pose.send does not return directly; we need onResults callback
+                // Workaround: wrap onResults into a one-shot promise
+              } catch (e) { reject(e); }
+            };
+            img.onerror = reject;
+            img.src = dataUrl;
+          } catch (err) {
+            reject(err);
+          }
+        });
+      }
+
+      // Properly use onResults pattern
+      let _resolver = null;
+      pose.onResults((res) => {
+        console.log('[PoseBridge] onResults landmarks=', (res.poseLandmarks||[]).length);
+        if (_resolver) {
+          const lm = (res.poseLandmarks || []).map(l => ({x: l.x, y: l.y, z: l.z || 0}));
+          _resolver(lm);
+          _resolver = null;
+        }
+      });
+
+      async function detectFromDataUrlOnce(dataUrl) {
+        return new Promise(async (resolve, reject) => {
+          try {
+            _resolver = resolve;
+            const img = new Image();
+            img.onload = async () => {
+              const canvas = document.createElement('canvas');
+              canvas.width = img.naturalWidth || img.width;
+              canvas.height = img.naturalHeight || img.height;
+              const ctx = canvas.getContext('2d');
+              ctx.drawImage(img, 0, 0);
+              await pose.send({image: canvas});
+            };
+            img.onerror = reject;
+            img.src = dataUrl;
+          } catch (e) { reject(e); }
+        });
+      }
+
+      async function detectFromVideoDataUrl(dataUrl, intervalMs) {
+        return new Promise((resolve, reject) => {
+          try {
+            const video = document.createElement('video');
+            video.src = dataUrl;
+            video.crossOrigin = 'anonymous';
+            video.muted = true;
+            video.playsInline = true;
+
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+
+            const frames = [];
+
+            let times = [];
+            let idx = 0;
+
+            function seekNext() {
+              if (idx >= times.length) {
+                resolve(frames);
+                return;
+              }
+              video.currentTime = times[idx] / 1000.0;
+            }
+
+            video.onloadedmetadata = async () => {
+              console.log('[PoseBridge] video metadata duration=', video.duration);
+              const durationMs = Math.floor(video.duration * 1000);
+              if (!isFinite(durationMs) || durationMs <= 0) {
+                reject(new Error('Invalid video duration'));
+                return;
+              }
+              const step = Math.max(100, Number(intervalMs) || 500);
+              times = [];
+              for (let t = 0; t < durationMs; t += step) times.push(t);
+              canvas.width = video.videoWidth || 640;
+              canvas.height = video.videoHeight || 360;
+              seekNext();
+            };
+
+            video.onseeked = async () => {
+              try {
+                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                const lm = await new Promise(async (res, rej) => {
+                  _resolver = res;
+                  try {
+                    await pose.send({ image: canvas });
+                  } catch (e) { rej(e); }
+                });
+                frames.push({ t: times[idx], landmarks: lm });
+                console.log('[PoseBridge] processed t=', times[idx], ' landmarks=', lm.length);
+                idx++;
+                seekNext();
+              } catch (e) { reject(e); }
+            };
+
+            video.onerror = reject;
+            // Begin load
+            video.load();
+          } catch (e) { reject(e); }
+        });
+      }
+
+      return { detectFromDataUrl: detectFromDataUrlOnce, detectFromVideoDataUrl };
+    })();
+  </script>
+  <!-- Workaround: avoid RequireJS/AMD interfering with Flutter bootstrap -->
+  <script>
+    if (window.define && window.define.amd) {
+      window._amdDefine = window.define; // save if needed elsewhere
+      try { window.define = undefined; } catch (_) {}
+    }
+  </script>
+  <script src="flutter_bootstrap.js" async></script>
+</body>
+</html>
+<!DOCTYPE html>
+<html>
+<head>
+  <!--
+    If you are serving your web app in a path other than the root, change the
+    href value below to reflect the base path you are serving from.
+
+    The path provided below has to start and end with a slash "/" in order for
+    it to work correctly.
+
+    For more details:
+    * https://developer.mozilla.org/en-US/docs/Web/HTML/Element/base
+
+    This is a placeholder for base href that will be replaced by the value of
+    the `--base-href` argument provided to `flutter build`.
+  -->
+  <base href="$FLUTTER_BASE_HREF">
+
+  <meta charset="UTF-8">
+  <meta content="IE=Edge" http-equiv="X-UA-Compatible">
+  <meta name="description" content="A new Flutter project.">
+
+  <!-- iOS meta tags & icons -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <meta name="apple-mobile-web-app-title" content="project">
+  <link rel="apple-touch-icon" href="icons/Icon-192.png">
+
+  <!-- Favicon -->
+  <link rel="icon" type="image/png" href="favicon.png"/>
+
+  <title>project</title>
+  <link rel="manifest" href="manifest.json">
+</head>
+<body>
+  <!-- MediaPipe Pose and bridge -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5/pose.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3/camera_utils.js"></script>
+  <script>
+    window.PoseBridge = (function() {
+      console.log('[PoseBridge] init');
+      const pose = new Pose({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5/${file}`});
+      pose.setOptions({
+        modelComplexity: 1,
+        smoothLandmarks: true,
+        enableSegmentation: false,
+        smoothSegmentation: false,
+        minDetectionConfidence: 0.5,
+        minTrackingConfidence: 0.5,
+      });
+
+      async function detectFromDataUrl(dataUrl) {
+        return new Promise(async (resolve, reject) => {
+          try {
+            const img = new Image();
+            img.onload = async () => {
+              try {
+                const canvas = document.createElement('canvas');
+                canvas.width = img.naturalWidth || img.width;
+                canvas.height = img.naturalHeight || img.height;
+                const ctx = canvas.getContext('2d');
+                ctx.drawImage(img, 0, 0);
+                const result = await pose.send({image: canvas});
+                // pose.send does not return directly; we need onResults callback
+                // Workaround: wrap onResults into a one-shot promise
+              } catch (e) { reject(e); }
+            };
+            img.onerror = reject;
+            img.src = dataUrl;
+          } catch (err) {
+            reject(err);
+          }
+        });
+      }
+
+      // Properly use onResults pattern
+      let _resolver = null;
+      pose.onResults((res) => {
+        console.log('[PoseBridge] onResults landmarks=', (res.poseLandmarks||[]).length);
+        if (_resolver) {
+          const lm = (res.poseLandmarks || []).map(l => ({x: l.x, y: l.y, z: l.z || 0}));
+          _resolver(lm);
+          _resolver = null;
+        }
+      });
+
+      async function detectFromDataUrlOnce(dataUrl) {
+        return new Promise(async (resolve, reject) => {
+          try {
+            _resolver = resolve;
+            const img = new Image();
+            img.onload = async () => {
+              const canvas = document.createElement('canvas');
+              canvas.width = img.naturalWidth || img.width;
+              canvas.height = img.naturalHeight || img.height;
+              const ctx = canvas.getContext('2d');
+              ctx.drawImage(img, 0, 0);
+              await pose.send({image: canvas});
+            };
+            img.onerror = reject;
+            img.src = dataUrl;
+          } catch (e) { reject(e); }
+        });
+      }
+
+      async function detectFromVideoDataUrl(dataUrl, intervalMs) {
+        return new Promise((resolve, reject) => {
+          try {
+            const video = document.createElement('video');
+            video.src = dataUrl;
+            video.crossOrigin = 'anonymous';
+            video.muted = true;
+            video.playsInline = true;
+
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+
+            const frames = [];
+
+            let times = [];
+            let idx = 0;
+
+            function seekNext() {
+              if (idx >= times.length) {
+                resolve(frames);
+                return;
+              }
+              video.currentTime = times[idx] / 1000.0;
+            }
+
+            video.onloadedmetadata = async () => {
+              console.log('[PoseBridge] video metadata duration=', video.duration);
+              const durationMs = Math.floor(video.duration * 1000);
+              if (!isFinite(durationMs) || durationMs <= 0) {
+                reject(new Error('Invalid video duration'));
+                return;
+              }
+              const step = Math.max(100, Number(intervalMs) || 500);
+              times = [];
+              for (let t = 0; t < durationMs; t += step) times.push(t);
+              canvas.width = video.videoWidth || 640;
+              canvas.height = video.videoHeight || 360;
+              seekNext();
+            };
+
+            video.onseeked = async () => {
+              try {
+                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                const lm = await new Promise(async (res, rej) => {
+                  _resolver = res;
+                  try {
+                    await pose.send({ image: canvas });
+                  } catch (e) { rej(e); }
+                });
+                frames.push({ t: times[idx], landmarks: lm });
+                console.log('[PoseBridge] processed t=', times[idx], ' landmarks=', lm.length);
+                idx++;
+                seekNext();
+              } catch (e) { reject(e); }
+            };
+
+            video.onerror = reject;
+            // Begin load
+            video.load();
+          } catch (e) { reject(e); }
+        });
+      }
+
+      return { detectFromDataUrl: detectFromDataUrlOnce, detectFromVideoDataUrl };
+    })();
+  </script>
+  <!-- Workaround: avoid RequireJS/AMD interfering with Flutter bootstrap -->
+  <script>
+    if (window.define && window.define.amd) {
+      window._amdDefine = window.define; // save if needed elsewhere
+      try { window.define = undefined; } catch (_) {}
+    }
+  </script>
+  <script src="flutter_bootstrap.js" async></script>
+</body>
+</html>
